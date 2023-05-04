@@ -7,6 +7,7 @@ MV-ModelNet.py: Running a contrastive network on ModelNet40 dataset using a
 # ---------------------------
 from model.NovelNetwork import NovelNetwork
 from model.layers.SupConLoss import SupConLoss
+from model.layers.MVNet import MV_CNN
 import data.utils
 
 import torch
@@ -16,24 +17,24 @@ from collections import OrderedDict
 # CONSTANTS
 # ---------------------------
 BATCH_SIZE = 64
-KKC = [0, 1, 2, 3, 4, 5, 6, 7, 8]              # Classes seen during training and test time (KKC)
-UUC = [9]                       # Classes not seen during training time (UUC)
-ALL_CLASSES = KKC + UUC         # All classes
-PERC_VAL = 0.20                 # Percent of data for validation 
+KKC = ["airplane", "toilet", "guitar"]  # Classes seen during training and test time (KKC)
+UUC = ["car"]                           # Classes not seen during training time (UUC)
+ALL_CLASSES = KKC + UUC                 # All classes
+PERC_VAL = 0.20                         # Percent of data for validation 
 # ---------------------------
 
-def MV_ModelNet(LATENT_DIMS=3, download=True):
+def MV_ModelNet(LATENT_DIMS=3):
     print("Collecting ModelNet data . . .\n")
-    MNIST = data.utils.get_MNIST(KKC=KKC, ALL=ALL_CLASSES, BATCH_SIZE=BATCH_SIZE)
+    MODELNET = data.utils.get_ModelNet(KKC=KKC, ALL=ALL_CLASSES, BATCH_SIZE=BATCH_SIZE)
     print(". . . done!")
 
     # Show examples from MNIST
-    data.utils.showImg2d(MNIST['TRAIN'])
+    data.utils.showImg2d(MODELNET['TRAIN'])
     # Set the device (CUDA compatibility needs to be added to NovelNetwork.py)
     USE_GPU = True
     dtype = torch.float32 # we will be using float throughout this tutorial
     if USE_GPU and torch.cuda.is_available():
-        device = torch.device('cuda')
+        device = torch.device('mps')
     else:
         device = torch.device('cpu')
 
@@ -43,31 +44,25 @@ def MV_ModelNet(LATENT_DIMS=3, download=True):
     print('using device:', device)
 
     # Define the layers
-    input_dims = 784 # 1 channels x 28 by 28 images
-    layers = OrderedDict([
-        ("Encoder", Encoder(LATENT_DIMS)),
-        ("Decoder", Decoder(LATENT_DIMS))
-    ])
+    layers = MV_CNN(LATENT_DIMS)
 
     # hyperparameters for our model
     args = {
     'print_every' : 100,
-    'feat_layer'  : 'Encoder',
-    'feat_sample' : 200,
+    'feat_layer'  : 'fc',
+    'feat_sample' : 50,
     'dist_metric' : 'mahalanobis',
-    'min_g' : 2,
-    'max_g' : 20,
-    'epoch' : 15,
+    'epoch' : 1,
     'lr' : 5e-4
     }
 
     # Run the model
     # ------------------------------------------------
-    new_model = NovelNetwork(layers, known_labels=KKC, criterion=torch.nn.CrossEntropyLoss)
-    new_model.train(MNIST['TRAIN'], MNIST['VAL'], args, print_info=True)
+    new_model = NovelNetwork(layers, known_labels=[i + 1 for i in range(0, len(KKC))], criterion=SupConLoss)
+    new_model.train(MODELNET['TRAIN'], MODELNET['VAL'], args, print_info=True)
     # ------------------------------------------------
 
-    new_model.test_analysis(MNIST['TEST'], print_info=True)
+    new_model.test_analysis(MODELNET['TEST'], print_info=True)
 
 
 

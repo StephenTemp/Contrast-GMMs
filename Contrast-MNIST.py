@@ -6,7 +6,7 @@ on a simply image dataset (MNIST) using NovelNet
 # IMPORTS 
 # ---------------------------
 from model.NovelNetwork import NovelNetwork
-from model.layers.LeNet import LeNet
+from model.layers.MVNet import MV_CNN
 from model.layers.SupConLoss import SupConLoss
 import data.utils
 
@@ -17,15 +17,15 @@ from collections import OrderedDict
 # CONSTANTS
 # ---------------------------
 BATCH_SIZE = 64
-KKC = [0, 1, 2, 3, 4, 5, 6, 7, 8]   # Classes seen during training and test time (KKC)
-UUC = [9]                           # Classes not seen during training time (UUC)
-ALL_CLASSES = KKC + UUC             # All classes
+KKC = ["airplane", "toilet", "guitar", "bed"]  # Classes seen during training and test time (KKC)
+UUC = ["car"]                           # Classes not seen during training time (UUC)
+ALL_CLASSES = KKC + UUC                 # All classes
 PERC_VAL = 0.20                     # Percent of data for validation 
 # ---------------------------
 
 def CNTwithMNIST(LATENT_DIMS=3):
     print("Collecting MNIST data . . .\n")
-    MNIST = data.utils.get_MNIST(KKC=KKC, ALL=ALL_CLASSES, BATCH_SIZE=BATCH_SIZE)
+    MNIST = data.utils.get_ModelNet(KKC=KKC, ALL=ALL_CLASSES, BATCH_SIZE=BATCH_SIZE)
     print(". . . done!")
 
     # Show examples from MNIST
@@ -40,34 +40,33 @@ def CNTwithMNIST(LATENT_DIMS=3):
 
 
     # Constant to control how frequently we print train loss
-    print_every = 100
     print('using device:', device)
 
     # Define the layers
-    input_dims = 784 # 1 channels x 28 by 28 images
-    layers = LeNet(1, LATENT_DIMS)
-
+    layers = MV_CNN(LATENT_DIMS)
     # hyperparameters for our model
     args = {
-    'print_every' : 100,
-    'feat_sample' : 200,
-    'feat_layer' : 'fc2',
-    'dist_metric' : 'mahalanobis',
-    'min_g' : 2,
-    'max_g' : 20,
-    'epoch' : 5,
-    'lr' : 1e-4
+        'print_every' : 100,
+        'feat_sample' : 200,
+        'feat_layer' : 'fc2',
+        'dist_metric' : 'mahalanobis',
+        'epoch' : 5,
+        'lr' : 1e-4
     }
+    
+    lrs = [1e-4, 5e-5, 1e-5, 5e-6]
+    acc_dict = {}
+    for lr in lrs:
+        args['lr'] = lr
+        # Run the model
+        # ------------------------------------------------
+        new_model = NovelNetwork(layers, known_labels=KKC, criterion=SupConLoss) # UPDATE THIS
+        acc = new_model.train(MNIST['TRAIN'], MNIST['VAL'], args, print_info=True)
+        # ------------------------------------------------
+        acc_dict[lr] = acc
+        #new_model.test_analysis(MNIST['TEST'], print_info=True)
 
-    # Run the model
-    # ------------------------------------------------
-    new_model = NovelNetwork(layers, known_labels=KKC, criterion=SupConLoss) # UPDATE THIS
-    new_model.train(MNIST['TRAIN'], MNIST['VAL'], args, print_info=True)
-    # ------------------------------------------------
-
-    new_model.test_analysis(MNIST['TEST'], print_info=True)
-
-
+    print(acc_dict)
 
 if __name__ == "__main__":
     CNTwithMNIST()

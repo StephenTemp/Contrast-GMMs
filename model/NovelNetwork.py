@@ -1,12 +1,13 @@
 # IMPORTS
 # ------------------------------------------
+from data.utils import showImg2d
+
 import torch
 import torchvision
 import torch.optim as optim
 import torch.nn.functional as F
 
-from sklearn.mixture import GaussianMixture
-from scipy.spatial.distance import mahalanobis
+from model.layers.GMM import GMM_block
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,7 +27,6 @@ class NovelNetwork(torch.nn.Module):
     known_labels = None     # Specify which labels are KKC
     threshold = None        # Distance threshold to classify as 'novel'
     dist_metric = None      # Distance metric (default: mahalanobis)
-    confidence_delta = None
 
     # ----------------------------------------------------
     # Nearest-Class Mean    # (this is another baseline)
@@ -36,10 +36,13 @@ class NovelNetwork(torch.nn.Module):
     def __init__(self, model, known_labels, criterion, use_gpu=True):
         super().__init__()
         self.criterion = criterion
-        self.known_labels = torch.tensor(known_labels)
+        self.known_labels = torch.tensor([i for i in range(0, len(known_labels))])
         
-        if use_gpu and torch.cuda.is_available():
-            self.device = torch.device('cuda')
+        self.class_map = {-1 : "novel"}
+        for i, label in enumerate(known_labels): self.class_map[i] = label
+
+        if use_gpu:
+            self.device = torch.device('mps')
         else:
             self.device = torch.device('cpu')
         
@@ -111,9 +114,6 @@ class NovelNetwork(torch.nn.Module):
         else: self.dist_metric = 'mahalanobis'
 
         print_every = args['print_every']
-        feat_samp = args['feat_sample']
-        min_clusters = args['min_g']
-        max_clusters = args['max_g']
         epochs = args['epoch']
         lr = args['lr']
 
@@ -121,7 +121,7 @@ class NovelNetwork(torch.nn.Module):
         # ---------------------
         model = self._modules['model']
         device = self.device
-        print(model._parameters)
+        print("Using device: ", device)
         optimizer = optim.Adam(model.parameters(), lr=lr)
         model = model.to(device=self.device)  # move the model parameters to CPU/GPU
 
@@ -130,6 +130,7 @@ class NovelNetwork(torch.nn.Module):
                 model.train()  # put model to training mode
                 x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU
                 y = y.to(device=device, dtype=torch.long)
+                
                 # Data Augmentation
                 aug_x = self.augment(x)
 
@@ -140,7 +141,7 @@ class NovelNetwork(torch.nn.Module):
                 feats[:, 0] = scores
                 feats[:, 1] = scores_aug
 
-                loss = criterion(feats, labels=y) #criterion(scores, y) #F.cross_entropy(scores, y)
+                loss = criterion(feats, labels=y)
 
                 # Zero out all of the gradients for the variables which the optimizer
                 # will update.
@@ -161,47 +162,49 @@ class NovelNetwork(torch.nn.Module):
         
         # run coarse search over gaussian mixture model
         # ---------------------------------------------
-        X_feats, _, y = self.GMM_batch(train_data, self.feat_layer, feat_samp)
+        print(train_data)
+        X_feats, y = self.GMM_batch(train_data, train=True)
 
-        best_aic = float('inf')
-        best_gmm = None
-        for n_comp in range(min_clusters, max_clusters):
-            cur_gmm = GaussianMixture(n_components=n_comp)
-            cur_gmm.fit(X_feats, y)
-            cur_aic = cur_gmm.aic(X_feats)
-            if cur_aic < best_aic:
-                best_aic = cur_aic
-                best_gmm = cur_gmm
-
-        self.gmm = best_gmm
-        print("Best # components: ", best_gmm.n_components)
+        cur_gmm = GMM_block(KKCs=self.known_labels, class_map=self.class_map)
+        train_acc = cur_gmm.train_GMM(X_feats, y)
+        self.gmm = cur_gmm
         
         # Set the mahalanobis threshold 
         # ------------------------------
-        X_test_feats, X_test, y_test = self.GMM_batch(val_data, self.feat_layer, feat_samp)
-        best_acc = self.set_threshold(X_test, X_test_feats, y_test)
-        return best_acc
+        return train_acc
     
 
-    def GMM_batch(self, loader, target_layer, num_batches=50):
+    # FUNCTION: GMM_batch
+    # SUMMARY: Use the network to produce embeddings, then max-pool the embeddings 
+    #          per-object for GMM processing
+    # ----------------------------------------------------------------------------
+    def GMM_batch(self, loader, train=False, verbose=False):
 
         X_feats = np.array([])
         X = torch.tensor([])
         y = torch.tensor([], dtype=torch.float32)
-        for i in range(0, num_batches):
+        for i in range(0, 10):
             cur_batch = iter(loader)
             X_batch, y_batch = next(cur_batch)
 
-            X_batch = X_batch.to(self.device)
-            cur_feats = self._modules['model'](X_batch) #self.extract_feats(X_batch, target_layer)
+            if verbose: showImg2d(cur_batch)
 
-            X = torch.cat((X.cpu(), X_batch.cpu()), axis=0)
+            X_batch = X_batch.to(self.device, torch.float32)
+            
+            if not train:
+                X_flat = torch.flatten(X_batch, end_dim=1)
+                scores = self._modules['model'](X_flat)
+                scores, _ = torch.max(scores, dim=0)
+                scores = torch.unsqueeze(scores, 0) # add dummy dimension
+            else: 
+                scores = self._modules['model'](X_batch)
+            
+            
             y = torch.cat((y.cpu(), y_batch.cpu()), axis=0)
+            if i == 0: X_feats = X_feats.reshape((0, scores.shape[1]))
+            X_feats = np.concatenate((X_feats, scores.detach().cpu()), axis=0)
 
-            if i == 0: X_feats = X_feats.reshape((0, cur_feats.shape[1]))
-            X_feats = np.concatenate((X_feats, cur_feats.detach().cpu()), axis=0)
-
-        return X_feats, X, y
+        return X_feats, y
 
 
     def check_accuracy(self, loader, get_wrong=False):
@@ -236,7 +239,7 @@ class NovelNetwork(torch.nn.Module):
             return wrong_imgs, np.array(wrong_labels)
     
 
-    def set_threshold(self, X, X_test_feats, y_test, print_info=False):
+    def set_threshold(self, X_test_feats, y_test, print_info=False):
         dist_metric = self.dist_metric
         y_novel = np.array(self.to_novel(y_test, label_kkc=True))
 
@@ -305,18 +308,20 @@ class NovelNetwork(torch.nn.Module):
         if True:#print_info==True:
             for i, label in enumerate(['known', 'novel']):
                 cur = i
-                plt.subplot(1, 2, 1)
-                plt.scatter(X_test_feats[cur_preds == cur, 0], X_test_feats[cur_preds == cur, 1], label=label)     
-                plt.scatter(gmm_means[:, 0], gmm_means[:, 1], marker='x', color='red')
+                fig = plt.subplot(1, 2, 1)
+                ax = fig.add_subplot(projection='3d')
+                ax.scatter(X_test_feats[cur_preds == cur, 0], X_test_feats[cur_preds == cur, 1], X_test_feats[cur_preds == cur, 2], label=label, marker='o')     
+                ax.scatter(gmm_means[:, 0], gmm_means[:, 1], gmm_means[:, 2], marker='o', color='red')
             plt.legend()
             plt.axis('off')
 
             y_test = y_test.numpy()
             for i, label in enumerate(self.known_labels.numpy()):
                 cur = i
-                plt.subplot(1, 2, 2)
-                plt.scatter(X_test_feats[y_test == cur, 0], X_test_feats[y_test == cur, 1], label=label)     
-            plt.scatter(X_test_feats[y_novel == 1, 0], X_test_feats[y_novel == 1, 1], label="novel") 
+                fig = plt.subplot(1, 2, 2)
+                ax = fig.add_subplot(projection='3d')
+                ax.scatter(X_test_feats[y_test == cur, 0], X_test_feats[y_test == cur, 1], X_test_feats[cur_preds == cur, 2], label=label, marker='o')     
+            ax.scatter(X_test_feats[y_novel == 1, 0], X_test_feats[y_novel == 1, 1], X_test_feats[y_novel == 1, 2], label="novel", marker='^') 
             
             plt.legend()
             plt.axis('off')
