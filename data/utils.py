@@ -150,7 +150,7 @@ class ModelNet(Dataset):
 
 
 
-def get_ModelNet(KKC, ALL, BATCH_SIZE=64, VAL_PERC = 0.20):
+def get_ModelNet(KKC, ALL, BATCH_SIZE=64, VAL_PERC = 0.50):
     dataset_train = ModelNet(ALL=ALL)
     dataset_test = ModelNet(ALL=ALL, train=False)    
 

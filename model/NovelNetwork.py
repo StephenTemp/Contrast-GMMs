@@ -1,13 +1,14 @@
 # IMPORTS
 # ------------------------------------------
 from data.utils import showImg2d
+from model.layers.utils import score_model
 
 import torch
 import torchvision
 import torch.optim as optim
 import torch.nn.functional as F
 
-from model.layers.GMM import GMM_block
+from model.layers.GMM_block import GMM_block
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,12 +34,12 @@ class NovelNetwork(torch.nn.Module):
     NearCM = None
     NearCM_delta = None
     
-    def __init__(self, model, known_labels, criterion, use_gpu=True):
+    def __init__(self, model, known_labels, criterion, use_gpu=False):
         super().__init__()
         self.criterion = criterion
         self.known_labels = torch.tensor([i for i in range(0, len(known_labels))])
         
-        self.class_map = {-1 : "novel"}
+        self.class_map = { -1 : "novel" }
         for i, label in enumerate(known_labels): self.class_map[i] = label
 
         if use_gpu:
@@ -47,6 +48,7 @@ class NovelNetwork(torch.nn.Module):
             self.device = torch.device('cpu')
         
         self.model = model
+        self.gmm = GMM_block(KKCs=self.known_labels, class_map=self.class_map, latent_dims=3)
     
     # FUNCTION: extract_feats( [], str ) => []
     # SUMMARY: provided a target layer and input, return feats from
@@ -67,28 +69,13 @@ class NovelNetwork(torch.nn.Module):
         if not label_kkc: input[bools] = IS_UCC
         else: return bools.to(dtype=int)
 
-    def raw_predict(self, input):
+    def predict(self, input, is_train=True, threshold=0.80):
         model = self._modules['model']
-        return model(input).argmax(1)
+        gmm = self.gmm
 
-    def predict(self, input):
-        if self.threshold == None: 
-            raise ValueError("Model is not yet trained!")
-
-        raw_preds = np.array(self.raw_predict(input))
-        feats = np.array(self.extract_feats(input, self.feat_layer).detach())
-        gmm_preds = self.gmm.predict(feats)
-        gmm_means = self.gmm.means_[gmm_preds]
-        gmm_cov = self.gmm.covariances_
-
-        std_dist = np.zeros(shape=feats.shape[0])
-        for i, sample_cov in enumerate(gmm_cov):
-            sample_inv = np.linalg.inv(sample_cov)
-            sample_dist = mahalanobis(feats[i], gmm_means[i], sample_inv)
-            std_dist[i] = sample_dist
-
-        raw_preds[std_dist > self.threshold] = -1
-        return raw_preds
+        scores = model(input)
+        if is_train == False: scores = torch.mean(scores, axis=0)[None, :]
+        return gmm.predict(scores, threshold=threshold), scores
     
     # FUNCTION: augment( x ) => x'
     # SUMMARY: provided some samples, augment them with respect to 
@@ -116,6 +103,7 @@ class NovelNetwork(torch.nn.Module):
         print_every = args['print_every']
         epochs = args['epoch']
         lr = args['lr']
+        lambda_const = args['lambda']
 
         # train neural network
         # ---------------------
@@ -125,6 +113,7 @@ class NovelNetwork(torch.nn.Module):
         optimizer = optim.Adam(model.parameters(), lr=lr)
         model = model.to(device=self.device)  # move the model parameters to CPU/GPU
 
+        cur_gmm = GMM_block(KKCs=self.known_labels, class_map=self.class_map, latent_dims=3)
         for _ in range(epochs):
             for t, (x, y) in enumerate(train_data):
                 model.train()  # put model to training mode
@@ -137,11 +126,13 @@ class NovelNetwork(torch.nn.Module):
                 scores = model(x)
                 scores_aug = model(aug_x)
 
+                gmm_loss = cur_gmm.gmm_loss(scores)
+
                 feats = torch.zeros(size=(scores.shape[0], 2, scores.shape[1]))
                 feats[:, 0] = scores
                 feats[:, 1] = scores_aug
 
-                loss = criterion(feats, labels=y)
+                loss = (1 - lambda_const) * criterion(feats, labels=y) + (lambda_const) * gmm_loss
 
                 # Zero out all of the gradients for the variables which the optimizer
                 # will update.
@@ -160,12 +151,13 @@ class NovelNetwork(torch.nn.Module):
                     #self.check_accuracy(val_data, model)
                     print()
         
+        # Save the trained model
+        torch.save(model.state_dict(), "model/saved/mvcnn_weights")
         # run coarse search over gaussian mixture model
         # ---------------------------------------------
         print(train_data)
         X_feats, y = self.GMM_batch(train_data, train=True)
 
-        cur_gmm = GMM_block(KKCs=self.known_labels, class_map=self.class_map)
         train_acc = cur_gmm.train_GMM(X_feats, y)
         self.gmm = cur_gmm
         
@@ -180,7 +172,7 @@ class NovelNetwork(torch.nn.Module):
     # ----------------------------------------------------------------------------
     def GMM_batch(self, loader, train=False, verbose=False):
 
-        X_feats = np.array([])
+        X_feats = torch.tensor([])
         X = torch.tensor([])
         y = torch.tensor([], dtype=torch.float32)
         for i in range(0, 10):
@@ -194,7 +186,7 @@ class NovelNetwork(torch.nn.Module):
             if not train:
                 X_flat = torch.flatten(X_batch, end_dim=1)
                 scores = self._modules['model'](X_flat)
-                scores, _ = torch.max(scores, dim=0)
+                scores, _ = torch.mean(scores, dim=0)
                 scores = torch.unsqueeze(scores, 0) # add dummy dimension
             else: 
                 scores = self._modules['model'](X_batch)
@@ -202,209 +194,76 @@ class NovelNetwork(torch.nn.Module):
             
             y = torch.cat((y.cpu(), y_batch.cpu()), axis=0)
             if i == 0: X_feats = X_feats.reshape((0, scores.shape[1]))
-            X_feats = np.concatenate((X_feats, scores.detach().cpu()), axis=0)
+            X_feats = torch.cat((X_feats, scores.detach().cpu()), axis=0)
 
         return X_feats, y
 
 
-    def check_accuracy(self, loader, get_wrong=False):
+    def check_accuracy(self, loader, get_wrong=False, OWL=False, threshold=0.8):
         model = self._modules['model']
+        gmm = self.gmm
         device = self.device
 
         if loader.dataset.train: print('Checking accuracy on validation set')
         else: print('Checking accuracy on test set')   
         num_correct = 0
         num_samples = 0
+        
+        all_samples, all_preds, all_y = [], [], []
+        
         wrong_imgs = []
         wrong_labels = []
         model.eval()  # set model to evaluation mode
         with torch.no_grad():
-            for x, y in loader:
+            for t, (x, y) in enumerate(loader):
                 x = x.to(device=device, dtype=torch.float32)  # move to device, e.g. GPU
                 y = y.to(device=device, dtype=torch.long)
-                scores = model(x)
-                _, preds = scores.max(1)
 
-                img_wr = x[preds != y].to('cpu')
-                label_wr = preds[preds != y].to('cpu')
-                wrong_imgs.extend(img_wr)
-                wrong_labels.extend(label_wr)
+                preds, x_new = self.predict(x[0], is_train=False, threshold=threshold)
+                all_samples.append(x_new.numpy()[0])
+                all_preds.append(preds[0])
+                all_y.append(y.numpy()[0])
 
-                num_correct += (preds == y).sum()
-                num_samples += preds.size(0)
+                num_correct += (preds == y.numpy()).sum()
+                num_samples += preds.shape[0]
             acc = float(num_correct) / num_samples
             print('Got %d / %d correct (%.2f)' % (num_correct, num_samples, 100 * acc))
-        
+         
         if get_wrong == True: 
             return wrong_imgs, np.array(wrong_labels)
-    
 
-    def set_threshold(self, X_test_feats, y_test, print_info=False):
-        dist_metric = self.dist_metric
-        y_novel = np.array(self.to_novel(y_test, label_kkc=True))
+        # convert to numpy arrays for cleanliness...
+        all_preds = np.array(all_preds)
+        all_y = np.array(all_y).flatten()
+        all_samples = np.array(all_samples)
 
-        gmm_preds = self.gmm.predict(X_test_feats)
-        gmm_means = self.gmm.means_[gmm_preds]
-        gmm_cov = self.gmm.covariances_
+        # Novelty Detection
+        if OWL == False:
+            all_y[all_y > max(self.known_labels.numpy())] = -1
+            novel_acc = self.novel_eval(all_preds, all_y)
 
-        # Calculate distance between instance and its clsoest center
-        # ----------------------------------------------
-        std_dist = np.zeros(shape=X_test_feats.shape[0])
-        for i, sample in enumerate(X_test_feats):
-            cur_sample = sample.reshape(-1, 1)
-            cur_mean = gmm_means[i].reshape(gmm_means[i].shape[0], 1)
-            
-            iv = np.linalg.inv(gmm_cov[gmm_preds[i]])
+            plt.figure(3)
+            plt.plot([0, 0.25, 0.50, 0.75, 1], list(novel_acc.values()))
+            plt.title("Novelty Accuracy by Lambda Constant")
+           #plt.show()
 
-            if dist_metric == 'euclidean': sample_dist = np.sum(np.abs(cur_sample - cur_mean))
-            elif dist_metric == 'mahalanobis': sample_dist = mahalanobis(cur_sample, cur_mean, iv)
-            else: raise ValueError('unsupported distance metric')
-            std_dist[i] = sample_dist
-        # ----------------------------------------------
+        # display outputs
+        gmm.display_GMM(all_preds, all_y, all_samples)
+        return novel_acc
 
-        # find the best novelty threshold
-        min_thresh = min(std_dist)
-        max_thresh = max(std_dist)
-        threshold = min_thresh
-        thresh_delta = abs(max_thresh - min_thresh)/1000
-        
-        cur_it = 0
-        best_acc = - float('inf')
-        best_threshold = None
-        while threshold < max_thresh:
-            cur_preds = np.copy(gmm_preds)
-            UUC_inds = std_dist > threshold
-            KKC_inds = std_dist <= threshold
+    def novel_eval(self, y_hat, y):
+        all_acc = {}
+        novel_lambdas = [0, 0.25, 0.50, 0.75, 1]
 
-            cur_preds[UUC_inds] = IS_UCC
-            cur_preds[KKC_inds] = IS_KKC
+        # compute novel accuracy
+        y_novel = y[(y == -1).nonzero()]
+        y_hat_novel = y_hat[(y == -1).nonzero()]
+        novel_acc = np.sum(y_novel == y_hat_novel)/len(y_novel)
 
-            cur_acc = np.sum(cur_preds == y_novel) / len(y_novel)
-            if cur_acc > best_acc:
-                best_acc = cur_acc
-                best_threshold = threshold
+        # compute KKC accuracy
+        y_KKC = y[(y != -1).nonzero()]
+        y_hat_KKC = y_hat[(y != -1).nonzero()]
+        KKC_acc = np.sum(y_KKC == y_hat_KKC)/len(y_KKC)
 
-            if print_info==True:
-                for i, label in enumerate(['novel', 'known']):
-                    cur = i - 1
-                    plt.scatter(X_test_feats[cur_preds == cur, 0], X_test_feats[cur_preds == cur, 1], label=label)
-                    plt.scatter(gmm_means[:, 0], gmm_means[:, 1], marker='x', color='red')
-                    #plt.title('Delta = {DELTA}, Acc = {ACC}'.format(DELTA=best_threshold, ACC=best_acc))
-
-                plt.legend()
-                plt.axis('off')
-                plt.savefig('train-plot.jpeg')
-                plt.show()
-
-            threshold += thresh_delta
-            cur_it = cur_it + 1
-
-        # plot best thresholding
-        cur_preds = np.copy(gmm_preds)
-        cur_preds[std_dist > best_threshold] = IS_UCC
-        cur_preds[std_dist <= best_threshold] = IS_KKC
-
-
-        if True:#print_info==True:
-            for i, label in enumerate(['known', 'novel']):
-                cur = i
-                fig = plt.subplot(1, 2, 1)
-                ax = fig.add_subplot(projection='3d')
-                ax.scatter(X_test_feats[cur_preds == cur, 0], X_test_feats[cur_preds == cur, 1], X_test_feats[cur_preds == cur, 2], label=label, marker='o')     
-                ax.scatter(gmm_means[:, 0], gmm_means[:, 1], gmm_means[:, 2], marker='o', color='red')
-            plt.legend()
-            plt.axis('off')
-
-            y_test = y_test.numpy()
-            for i, label in enumerate(self.known_labels.numpy()):
-                cur = i
-                fig = plt.subplot(1, 2, 2)
-                ax = fig.add_subplot(projection='3d')
-                ax.scatter(X_test_feats[y_test == cur, 0], X_test_feats[y_test == cur, 1], X_test_feats[cur_preds == cur, 2], label=label, marker='o')     
-            ax.scatter(X_test_feats[y_novel == 1, 0], X_test_feats[y_novel == 1, 1], X_test_feats[y_novel == 1, 2], label="novel", marker='^') 
-            
-            plt.legend()
-            plt.axis('off')
-            plt.savefig('train-plot.jpeg')
-            plt.show()   
-        return best_acc
-
-    def test_analysis(self, loader, get_wrong=False, print_info=False):
-        model = self._modules['model']
-        dist_metric = self.dist_metric
-        X_test_feats, X_test, y_test = self.GMM_batch(loader, self.feat_layer, 20)
-        y_test = np.array(self.to_novel(y_test))
-        y_test = np.array(y_test)
-
-        preds = torch.tensor(self.predict(X_test))
-        preds = np.array(self.to_novel(preds))
-
-        gmm_preds = self.gmm.predict(X_test_feats)
-        gmm_means = self.gmm.means_[gmm_preds]
-        gmm_cov = self.gmm.covariances_[gmm_preds]
-        std_dist = np.zeros(shape=X_test_feats.shape[0])
-        for i, sample in enumerate(X_test_feats):
-            cur_sample = sample.reshape(-1, 1)
-            cur_mean = gmm_means[i].reshape(gmm_means[i].shape[0], 1)
-            
-            iv = np.linalg.inv(gmm_cov[gmm_preds[i]])
-            if dist_metric == 'euclidean': sample_dist = np.sum(np.abs(cur_sample - cur_mean))
-            elif dist_metric == 'mahalanobis': sample_dist = mahalanobis(cur_sample, cur_mean, iv)
-            else: raise ValueError('unsupported distance metric')
-            
-            std_dist[i] = sample_dist
-        
-        preds[std_dist > self.threshold] = IS_UCC
-
-        acc = np.sum(preds == y_test) / len(y_test)
-        preds[preds > IS_UCC] = 0
-
-        if print_info==True:
-            for i, label in enumerate(['novel', 'known']):
-                    cur = i - 1
-                    plt.figure('Test Analysis')
-                    plt.scatter(X_test_feats[preds == cur, 0], X_test_feats[preds == cur, 1], label=label)
-                            
-                    plt.scatter(self.gmm.means_[:, 0], self.gmm.means_[:, 1], marker='x', color='red')
-                    plt.title('Delta = {DELTA}, Acc = {ACC}'.format(DELTA=self.threshold, ACC=acc))
-                    plt.legend()
-            plt.savefig('test-plot.jpeg')
-            plt.show()
-
-            # Ground truth plot
-            plt.figure('Ground Truth')
-            plt.scatter(X_test_feats[y_test == IS_NOVEL, 0], X_test_feats[y_test == IS_NOVEL, 1], label='novel')
-            plt.scatter(X_test_feats[np.where((y_test == 0) | (y_test == 1)), 0], X_test_feats[np.where((y_test == 0) | (y_test == 1)), 1], label='known')
-
-            plt.scatter(self.gmm.means_[:, 0], self.gmm.means_[:, 1], marker='x', color='red')
-            plt.title('Delta = {DELTA}, Acc = {ACC}'.format(DELTA=self.threshold, ACC=acc))
-            plt.legend()
-            plt.savefig('test-truth-plot.jpeg')
-            plt.show()
-
-        info = {}
-
-        raw_preds = np.array(self.raw_predict(X_test))
-        raw_acc = np.sum(raw_preds == y_test) / len(y_test)
-        true_novel = y_test[y_test == -1]
-
-        # compute recall on novel class
-        # ------------------------------
-        pred_novel = preds[y_test == -1]
-        info['novel_recall'] =  np.sum(pred_novel == true_novel) / len(true_novel)
-        # ------------------------------
-
-        return acc, raw_acc, info
-
-
-    def plot_feats(self, data, target_layer):
-        X_feats, X, y = self.GMM_batch(data, target_layer, 20)
-        y = self.to_novel(y)
-        y[y != IS_NOVEL] = 0 
-
-        plt.figure()
-        plt.scatter(X_feats[y == IS_NOVEL, 0], X_feats[y == IS_NOVEL, 1], label='novel')
-        plt.scatter(X_feats[y == 0, 0], X_feats[y == 0, 1], label='known')
-
-        plt.axis('off')
-        plt.savefig('feats-{layer}.jpeg'.format(layer=target_layer))
+        for lamb in novel_lambdas: all_acc[lamb] = lamb * KKC_acc + (1 - lamb) * novel_acc     
+        return all_acc

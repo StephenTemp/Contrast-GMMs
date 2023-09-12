@@ -11,6 +11,7 @@ from model.layers.MVNet import MV_CNN
 import data.utils
 
 import torch
+import numpy as np
 from collections import OrderedDict
 # ---------------------------
 
@@ -52,18 +53,43 @@ def MV_ModelNet(LATENT_DIMS=3):
     'feat_layer'  : 'fc',
     'feat_sample' : 50,
     'dist_metric' : 'mahalanobis',
-    'epoch' : 1,
-    'lr' : 5e-4
+    'epoch' : 10,
+    'lr' : 5e-4,
+    'train_model' : False,
+    'saved_weights' : "model/saved/mvcnn_weights_lambda_p25",
+    "lambda" : 0.15
     }
 
     # Run the model
     # ------------------------------------------------
-    new_model = NovelNetwork(layers, known_labels=[i + 1 for i in range(0, len(KKC))], criterion=SupConLoss)
-    new_model.train(MODELNET['TRAIN'], MODELNET['VAL'], args, print_info=True)
+    new_model = NovelNetwork(layers, known_labels=np.array(KKC), criterion=SupConLoss)
+
+    if args['train_model'] == True:
+        new_model.train(MODELNET['TRAIN'], MODELNET['VAL'], args, print_info=True)
+    else: 
+        new_model._modules['model'].load_state_dict(torch.load(args["saved_weights"]))
+        # Then train the GMM seperately
+        X_feats, y = new_model.GMM_batch(MODELNET['TRAIN'], train=True)
+        train_acc = new_model.gmm.train_GMM(X_feats, y)
+
     # ------------------------------------------------
 
-    new_model.test_analysis(MODELNET['TEST'], print_info=True)
+    # Evaluate the model on the test set
+    test_thresholds = [0, 0.2, 0.4, 0.6, 0.8, 1, 1.2, 1.4, 1.5]
+    best_acc = { 0.5 : 0 }
+    best_threshold = None
+    for threshold in test_thresholds:
+        accs = new_model.check_accuracy(MODELNET['VAL'], threshold=threshold)
+        print("Threshold: ", threshold, " | ", accs)
+        mean_acc = accs[0.5]
+        if mean_acc > best_acc[0.5]:
+            best_acc = accs
+            best_threshold = threshold
 
+    print('Best Mean Accuracy: ', best_acc)
+    print('Best Threshold: ', best_threshold)
+
+    test = 5
 
 
 if __name__ == "__main__":
