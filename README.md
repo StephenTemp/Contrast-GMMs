@@ -12,7 +12,15 @@ A sample of _ModelNet40_ is included--unzipped--in the ``data`` folder. To run t
 | 0.25 | 0.7   | 0.72     | 0.74     | 0.76     | 0.78  |
 | 0.5  | 0.7   | 0.7      | 0.71     | 0.71     | 0.72  |
 
-We examine the impact of the GMM loss term both qual-
-itatively and quantitatively: **Figure 2** (below) shows our model embeddings with and without the GMM loss term. Embeddings trained without the Gaussian loss term are, expectedly, less Gaussian, which we confirm empirically in the **Table above**. Both findings suggest a trade-off between the Gaussian and contrastive objectives, where the proper δ is selected empirically over the validation set, optimizing for λ = 0.5.
+We examine the impact of the GMM loss term both qualitatively and quantitatively: **Figure 2** (below) shows our model embeddings with and without the GMM loss term. Embeddings trained without the Gaussian loss term are, expectedly, less Gaussian, which we confirm empirically in the **Table above**. Both findings suggest a trade-off between the Gaussian and contrastive objectives, where the proper δ is selected empirically over the validation set, optimizing for λ = 0.5.
+
+![Results](plots/embeddings.png)
+
+We compare our model results to that of (a) confidence
+thresholding, a simple but general open-set classification
+method, and (b) Clip2Point, a recent adaptation of the zero-shot method CLIP to 3D [5, 7]. We implement thresholding from scratch, training another MV-CNN with an identical architecture but capped with a softmax layer. We then
+threshold the output probabilities $$ p(i) $$ by some $$ t $$ such that if $$ p(i) < t $$ we label the instance as being novel.
 
 ![Results](plots/exp-plot.jpeg)
+
+the figure above (**Figure 3** in the report) shows the results of our experiment, which are compelling since we can achieve comparable accuracy to Clip2Point; however, we re-emphasize that these results cover a limited space of the Open-World problem. We observed instances of only one novel class and thus do not share the burden of reconciling rival novel classes as Clip2Point does, since this was out of the scope of this paper.
