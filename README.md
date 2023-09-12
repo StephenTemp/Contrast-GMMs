@@ -4,3 +4,14 @@
 
 ## How to Run
 A sample of _ModelNet40_ is included--unzipped--in the ``data`` folder. To run the model on the following classes (which includes ```airplane, bed, car, guitar, and toilet```). Run the ```MV-ModelNet.py``` file to reproduce our results reported in our paper. 
+
+## Results
+| ----------------------------------------------------- |
+| δ    | λ = 0 | λ = 0.25 | λ = 0.50 | λ = 0.75 | λ = 1 |
+| -----| ----- | -------- | -------- | -------- | ----- |
+| 0    | 1     | 0.85     | 0.71     | 0.58     | 0.43  |
+| 0.25 | 0.7   | 0.72     | 0.74     | 0.76     | 0.78  |
+| 0.5  | 0.7   | 0.7      | 0.71     | 0.71     | 0.72  |
+| ----------------------------------------------------- |
+
+![Results](plots/exp-plot.jpeg)
