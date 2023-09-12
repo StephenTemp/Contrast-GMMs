@@ -12,4 +12,7 @@ A sample of _ModelNet40_ is included--unzipped--in the ``data`` folder. To run t
 | 0.25 | 0.7   | 0.72     | 0.74     | 0.76     | 0.78  |
 | 0.5  | 0.7   | 0.7      | 0.71     | 0.71     | 0.72  |
 
+We examine the impact of the GMM loss term both qual-
+itatively and quantitatively: **Figure 2** (below) shows our model embeddings with and without the GMM loss term. Embeddings trained without the Gaussian loss term are, expectedly, less Gaussian, which we confirm empirically in the **Table above**. Both findings suggest a trade-off between the Gaussian and contrastive objectives, where the proper δ is selected empirically over the validation set, optimizing for λ = 0.5.
+
 ![Results](plots/exp-plot.jpeg)
