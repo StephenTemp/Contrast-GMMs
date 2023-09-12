@@ -10,6 +10,8 @@ The Open-World Learning literature is nearly vacant with respect to 3D data; how
 
 $$NA = \lambda_r(ACC_{K}) + (1 - \lambda_r)(ACC_{N})$$
 
+In practice, however, we scale the Gaussian term with a constant $\delta$ to identify an ideal trade-off between the Gaussian and contrastive objectives.
+
 | δ    | λ = 0 | λ = 0.25 | λ = 0.50 | λ = 0.75 | λ = 1 |
 | -----| ----- | -------- | -------- | -------- | ----- |
 | 0    | 1     | 0.85     | 0.71     | 0.58     | 0.43  |
