@@ -7,7 +7,8 @@ A sample of _ModelNet40_ is included--unzipped--in the ``data`` folder. To run t
 
 ## Results
 The Open-World Learning literature is nearly vacant with respect to 3D data; however, we adapt many of its conventions for analyzing known and unknown data classes. For instance, we implement an accuracy metric to scale priority given to novel instances vs. known instances; that is, our reported accuracy (NA) is a mixture of the novel (N) and known (K) accuracy metrics:
-$$ NA = \lambda_r(ACC_{K}) + (1 - \lambda_r)(ACC_{N}) $$
+
+$$NA = \lambda_r(ACC_{K}) + (1 - \lambda_r)(ACC_{N})$$
 
 | δ    | λ = 0 | λ = 0.25 | λ = 0.50 | λ = 0.75 | λ = 1 |
 | -----| ----- | -------- | -------- | -------- | ----- |
